@@ -111,12 +111,14 @@ def llm_skill_tags(db, tasks: list[dict]) -> list[list[str]]:
     return tags
 
 
-def _match_with_weights(db, ts, days, busy, weights, cap: bool) -> list[list[int]]:
+def _match_with_weights(db, ts, days, busy, weights, cap: bool, role: bool = True) -> list[list[int]]:
     s = get_settings()
     saved = s.match_alpha, s.match_beta, s.match_gamma
     s.match_alpha, s.match_beta, s.match_gamma = weights
     try:
-        res = match_tasks(db, ts, days=days, with_reasons=False, busy=busy, capacity_constraint=cap)
+        res = match_tasks(
+            db, ts, days=days, with_reasons=False, busy=busy, capacity_constraint=cap, role_filter=role
+        )
     finally:
         s.match_alpha, s.match_beta, s.match_gamma = saved
     return [[c["user_id"] for c in r["candidates"]] for r in res]
@@ -128,23 +130,28 @@ def eval_matching(db, projects: list[dict]) -> dict:
     - text: 태그 없이 제목과 설명만 준다.
     - llmtags: 실제 파이프라인처럼 LLM이 사내 스킬 목록에서 태그를 고른다.
     - tags: 연구자가 적은 태그를 그대로 준다(기본 세트만). 정답 담당자의 스킬 이름으로 적었으므로 상한으로만 본다.
-    `_nocap`은 수용 시간 제약 없이 업무량 감점만 쓰는 버전이다.
+    `_nocap`은 수용 시간 제약 없이 업무량 감점만 쓰는 버전이고, `_notier`는 제약은 쓰되 후보 계층 없이
+    점수 순서로만 대체자를 고르는 버전이다.
     LLM 단독은 제목, 설명, 예상 시간과 팀원별 업무량·수용 시간을 받는다.
     """
     s = get_settings()
     default = (s.match_alpha, s.match_beta, s.match_gamma)
     has_gold = all(t["gold_tags"] is not None for p in projects for t in p["tasks"])
-    # (가중치, 태그 종류, 수용 시간 제약). 스킬 유사도 단독은 제약 없이 순수 기준선으로 둔다.
+    # (가중치, 태그 종류, 수용 시간 제약, 후보 계층). 스킬 유사도 단독은 제약 없이 순수 기준선으로 둔다.
     skill = (1.0, 0.0, 0.0)
     variants = {
-        "hybrid_text": (default, "none", True),
-        "skill_only_text": (skill, "none", False),
-        "hybrid_llmtags": (default, "llm", True),
-        "hybrid_llmtags_nocap": (default, "llm", False),
-        "skill_only_llmtags": (skill, "llm", False),
+        "hybrid_text": (default, "none", True, True),
+        "skill_only_text": (skill, "none", False, False),
+        "hybrid_llmtags": (default, "llm", True, True),
+        "hybrid_llmtags_notier": (default, "llm", True, False),
+        "hybrid_llmtags_nocap": (default, "llm", False, False),
+        "skill_only_llmtags": (skill, "llm", False, False),
     }
     if has_gold:
-        variants |= {"hybrid_tags": (default, "gold", True), "skill_only_tags": (skill, "gold", False)}
+        variants |= {
+            "hybrid_tags": (default, "gold", True, True),
+            "skill_only_tags": (skill, "gold", False, False),
+        }
 
     methods = [*variants, "llm_only"]
     rows = []
@@ -155,12 +162,12 @@ def eval_matching(db, projects: list[dict]) -> dict:
         if has_gold:
             tag_sets["gold"] = [t["gold_tags"] for t in p["tasks"]]
         preds: dict[str, list[list[int]]] = {}
-        for m, (weights, kind, cap) in variants.items():
+        for m, (weights, kind, cap, tier) in variants.items():
             ts = [
                 {**b, "required_skills": tg, "estimate_hours": t["hours"]}
                 for b, tg, t in zip(base, tag_sets[kind], p["tasks"], strict=True)
             ]
-            preds[m] = _match_with_weights(db, ts, p["days"], p["busy"], weights, cap)
+            preds[m] = _match_with_weights(db, ts, p["days"], p["busy"], weights, cap, tier)
         ts = [{**b, "estimate_hours": t["hours"]} for b, t in zip(base, p["tasks"], strict=True)]
         preds["llm_only"] = [r[:3] for r in match_tasks_llm_only(db, ts, days=p["days"], busy=p["busy"])]
 

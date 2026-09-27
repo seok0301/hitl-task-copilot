@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     match_gamma: float = 0.2
     # 배정하면 기간 수용 시간을 넘는 후보를 뒤로 미룬다.
     match_capacity_constraint: bool = True
+    # 수용 시간 제약을 쓸 때, 대체자를 필요 스킬 보유자 → 같은 팀 → 나머지 순서로 찾는다.
+    match_role_filter: bool = True
 
 
 @lru_cache

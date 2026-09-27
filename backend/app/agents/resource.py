@@ -6,7 +6,8 @@ score = α·스킬 적합도 + β·과거 유사 업무 이력 − γ·업무량
 - 업무량: (진행 중인 업무 + 이번 계획에서 먼저 배정된 업무) / 프로젝트 기간 동안의 수용 시간
 스킬 적합도와 이력 점수는 태스크마다 후보 전체에서 0~1로 정규화한다.
 수용 시간 제약: 이 태스크를 맡으면 기간 수용 시간을 넘는 후보는 점수와 관계없이 순위를 뒤로 미룬다.
-(모든 후보가 넘으면 점수 순서를 그대로 쓴다.)
+(모든 후보가 넘으면 점수 순서를 그대로 쓴다.) 넘지 않는 후보는 다시 필요 스킬 보유자, 점수 1위와 같은 팀,
+나머지 순서의 계층으로 나눠, 적임자가 빠졌을 때 직무가 다른 사람이 대체자로 올라오지 않게 한다.
 """
 
 from dataclasses import dataclass, field
@@ -81,6 +82,7 @@ def score_task(
     weeks: float = 1.0,
     task_hours: float = 0.0,
     capacity_constraint: bool | None = None,
+    role_filter: bool | None = None,
 ) -> list[dict]:
     s = get_settings()
     if capacity_constraint is None:
@@ -109,9 +111,24 @@ def score_task(
     over = np.array(
         [c.load_hours + extra_load.get(c.user_id, 0) + task_hours > c.capacity * weeks for c in cands]
     )
-    order = np.argsort(-total)
+    order = [int(i) for i in np.argsort(-total)]
+    tier = [0] * len(cands)
     if capacity_constraint and not over.all():
-        order = np.array([i for i in order if not over[i]] + [i for i in order if over[i]])
+        if role_filter is None:
+            role_filter = s.match_role_filter
+        # 후보 계층: 과부하 적임자를 뺄 때, 직무가 맞는 사람부터 대체자로 찾는다.
+        # 0: 필요 스킬 보유  1: 점수 1위와 같은 팀  2: 나머지  3: 수용 시간 초과
+        top_team = cands[order[0]].team
+        for i, c in enumerate(cands):
+            if over[i]:
+                tier[i] = 3
+            elif not role_filter or req and req & set(c.skills):
+                tier[i] = 0
+            elif c.team == top_team:
+                tier[i] = 1
+            else:
+                tier[i] = 2
+        order = sorted(order, key=lambda i: tier[i])  # 안정 정렬이라 같은 계층 안에서는 점수 순서가 유지된다
     ranked = []
     for i in order:
         c = cands[i]
@@ -125,6 +142,7 @@ def score_task(
                 "history": round(float(hist_n[i]), 4),
                 "load": round(float(load[i]), 4),
                 "over_capacity": bool(over[i]),
+                "tier": tier[i],
                 "similar_past_task": hist_title[i],
             }
         )
@@ -153,6 +171,7 @@ def match_tasks(
     with_reasons: bool = True,
     busy: dict[int, float] | None = None,
     capacity_constraint: bool | None = None,
+    role_filter: bool | None = None,
 ) -> list[dict]:
     """태스크마다 상위 3명 후보와 추천 담당자를 돌려준다.
 
@@ -166,7 +185,9 @@ def match_tasks(
     results = []
     for t, v in zip(tasks, vecs, strict=True):
         hours = float(t.get("estimate_hours") or 8)
-        ranked = score_task(v, cands, extra, t.get("required_skills"), weeks, hours, capacity_constraint)
+        ranked = score_task(
+            v, cands, extra, t.get("required_skills"), weeks, hours, capacity_constraint, role_filter
+        )
         top = ranked[0]
         extra[top["user_id"]] = extra.get(top["user_id"], 0) + hours
         results.append({"assignee_id": top["user_id"], "candidates": ranked[:3], "reason": ""})
