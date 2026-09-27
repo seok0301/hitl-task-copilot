@@ -1,0 +1,37 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", extra="ignore")
+
+    database_url: str = "postgresql+psycopg://hitl:hitl@localhost:5442/hitl"
+
+    llm_provider: str = "mock"  # litellm | gemini | mock
+    llm_model: str = "gemma-4-26b"
+    litellm_base_url: str = "http://localhost:4000/v1"
+    litellm_api_key: str = ""
+    gemini_api_key: str = ""
+    llm_temperature: float = 0.2
+
+    embedding_provider: str = "fastembed"  # fastembed | mock
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_dim: int = 384
+    embedding_cache_dir: str = str(ROOT_DIR / ".cache" / "fastembed")
+
+    jwt_secret: str = "change-me"
+    jwt_expire_minutes: int = 60 * 12
+
+    # 담당자 추천 가중치: score = α·스킬 유사도 + β·이력 점수 − γ·업무량
+    match_alpha: float = 0.5
+    match_beta: float = 0.3
+    match_gamma: float = 0.2
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
