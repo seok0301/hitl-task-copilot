@@ -4,6 +4,7 @@ import os
 
 os.environ["DATABASE_URL"] = "postgresql+psycopg://hitl:hitl@localhost:5442/hitl_test"
 os.environ["LLM_PROVIDER"] = "mock"
+os.environ["JWT_SECRET"] = "test-secret-" + "x" * 32
 
 import psycopg  # noqa: E402
 import pytest  # noqa: E402
