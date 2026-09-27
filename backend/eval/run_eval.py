@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from sqlalchemy import func, select
 
-from app.agents.planner import plan_tasks
+from app.agents.planner import plan_tasks, skill_vocabulary
 from app.agents.resource import load_candidates, match_tasks, match_tasks_llm_only, task_text
 from app.config import ROOT_DIR, get_settings
 from app.db import SessionLocal
@@ -52,38 +52,81 @@ def workload_stats(assign: list[int], hours: list[float], pool: list[int]) -> di
     }
 
 
-def eval_matching(db) -> dict:
-    pool = [c.user_id for c in load_candidates(db)]
-    methods = {"hybrid": [], "skill_only": [], "llm_only": []}
+def _match_with_weights(db, ts, days, weights):
     s = get_settings()
+    saved = s.match_alpha, s.match_beta, s.match_gamma
+    s.match_alpha, s.match_beta, s.match_gamma = weights
+    try:
+        return [r["candidates"] for r in match_tasks(db, ts, days=days, with_reasons=False)]
+    finally:
+        s.match_alpha, s.match_beta, s.match_gamma = saved
+
+
+TAG_SYSTEM = """너는 태스크에 필요한 스킬을 고르는 에이전트다.
+각 태스크에 필요한 스킬을 "사내 스킬 목록"에 있는 이름 그대로 1~3개 고른다.
+출력 형식: {"tags": [{"index": 0, "skills": ["..."]}]}"""
+
+
+def llm_skill_tags(db, tasks: list[dict]) -> list[list[str]]:
+    """실제 파이프라인에서 계획 에이전트가 하는 것처럼 LLM이 스킬 태그를 붙인다."""
+    vocab = skill_vocabulary(db)
+    user = f"사내 스킬 목록: {', '.join(vocab)}\n\n태스크:\n"
+    user += "\n".join(f"[{i}] {t['title']}: {t['description']}" for i, t in enumerate(tasks))
+    out = call_json("eval_tagger", TAG_SYSTEM, user, mock=lambda: {"tags": []})
+    tags: list[list[str]] = [[] for _ in tasks]
+    for item in out.get("tags", []):
+        idx = item.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(tasks):
+            tags[idx] = [sk for sk in item.get("skills", []) if sk in vocab]
+    return tags
+
+
+def eval_matching(db) -> dict:
+    """태스크 텍스트만 주는 조건(text)과 필요 스킬 태그까지 주는 조건(tags)을 나눠 본다.
+
+    평가 세트의 필요 스킬 태그는 연구자가 정답 담당자의 스킬 이름으로 적은 것이라 정답 정보가 섞여 있다.
+    그래서 방법 간 비교는 text 조건과 llmtags 조건(LLM이 스킬 목록에서 태그를 고른 실제 파이프라인)으로 하고,
+    tags 조건은 스킬 태그가 정확할 때의 상한으로만 본다.
+    LLM 단독은 원래 제목과 설명만 받는다.
+    """
+    pool = [c.user_id for c in load_candidates(db)]
+    s = get_settings()
+    default = (s.match_alpha, s.match_beta, s.match_gamma)
+    variants = {
+        "hybrid_text": (default, "none"),
+        "skill_only_text": ((1.0, 0.0, 0.0), "none"),
+        "hybrid_llmtags": (default, "llm"),
+        "skill_only_llmtags": ((1.0, 0.0, 0.0), "llm"),
+        "hybrid_tags": (default, "gold"),
+        "skill_only_tags": ((1.0, 0.0, 0.0), "gold"),
+    }
+    methods: dict[str, list] = {m: [] for m in [*variants, "llm_only"]}
     rows = []
-    for pid, title, _goal, days, tasks in EVAL_PROJECTS:
-        ts = [
-            {"title": t, "description": d, "required_skills": sk, "estimate_hours": 16}
-            for t, d, sk, _, _ in tasks
-        ]
-        hybrid = [r["candidates"] for r in match_tasks(db, ts, days=days, with_reasons=False)]
+    for pid, _title, _goal, days, tasks in EVAL_PROJECTS:
+        preds_by_method = {}
+        base = [{"title": t, "description": d} for t, d, _, _, _ in tasks]
+        tag_sets = {
+            "none": [[] for _ in tasks],
+            "gold": [sk for _, _, sk, _, _ in tasks],
+            "llm": llm_skill_tags(db, base),
+        }
+        for m, (weights, tag_kind) in variants.items():
+            ts = [
+                {**b, "required_skills": tg, "estimate_hours": 16}
+                for b, tg in zip(base, tag_sets[tag_kind], strict=True)
+            ]
+            preds_by_method[m] = [
+                [c["user_id"] for c in cands] for cands in _match_with_weights(db, ts, days, weights)
+            ]
+        ts = [{"title": t, "description": d, "estimate_hours": 16} for t, d, _, _, _ in tasks]
+        preds_by_method["llm_only"] = [r[:3] for r in match_tasks_llm_only(db, ts)]
 
-        # 스킬 유사도 단독: α=1, β=γ=0
-        a, b, g = s.match_alpha, s.match_beta, s.match_gamma
-        s.match_alpha, s.match_beta, s.match_gamma = 1.0, 0.0, 0.0
-        try:
-            skill_only = [r["candidates"] for r in match_tasks(db, ts, days=days, with_reasons=False)]
-        finally:
-            s.match_alpha, s.match_beta, s.match_gamma = a, b, g
-
-        llm_only = match_tasks_llm_only(db, ts)
         for i, (t_title, _, _, gt, ok) in enumerate(tasks):
             acc = {gt, *ok}
-            preds = {
-                "hybrid": [c["user_id"] for c in hybrid[i]],
-                "skill_only": [c["user_id"] for c in skill_only[i]],
-                "llm_only": llm_only[i][:3],
-            }
-            row = {"project": pid, "task": t_title, "gt": gt, "ok": ok}
-            for m, p in preds.items():
-                methods[m].append((p, acc, 16.0))
-                row[m] = p
+            row = {"project": pid, "task": t_title, "gt": gt, "ok": ok, "llm_tags": tag_sets["llm"][i]}
+            for m, preds in preds_by_method.items():
+                methods[m].append((preds[i], acc, 16.0))
+                row[m] = preds[i]
             rows.append(row)
 
     summary = {}
