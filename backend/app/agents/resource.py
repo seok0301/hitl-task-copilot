@@ -1,7 +1,10 @@
 """② 리소스 에이전트: 하이브리드 점수로 담당자를 고르고, LLM은 추천 사유만 쓴다.
 
-score = α·스킬 유사도 + β·과거 유사 업무 이력 − γ·현재 업무량
-스킬 유사도와 이력 점수는 태스크마다 후보 전체에서 0~1로 정규화한다.
+score = α·스킬 적합도 + β·과거 유사 업무 이력 − γ·업무량
+- 스킬 적합도: 태스크와 팀원 스킬의 임베딩 유사도와 필요 스킬 태그 일치율의 평균
+- 이력: 팀원이 과거에 맡은 태스크 중 가장 비슷한 것과의 임베딩 유사도
+- 업무량: (진행 중인 업무 + 이번 계획에서 먼저 배정된 업무) / 프로젝트 기간 동안의 수용 시간
+스킬 적합도와 이력 점수는 태스크마다 후보 전체에서 0~1로 정규화한다.
 """
 
 from dataclasses import dataclass, field
@@ -68,11 +71,18 @@ def _minmax(x: np.ndarray) -> np.ndarray:
 
 
 def score_task(
-    task_vec: np.ndarray, cands: list[Candidate], extra_load: dict[int, float] | None = None
+    task_vec: np.ndarray,
+    cands: list[Candidate],
+    extra_load: dict[int, float] | None = None,
+    required_skills: list[str] | None = None,
+    weeks: float = 1.0,
 ) -> list[dict]:
     s = get_settings()
     extra_load = extra_load or {}
-    skill = np.array([float(task_vec @ c.skill_vec) for c in cands])
+    req = set(required_skills or [])
+    emb = np.array([float(task_vec @ c.skill_vec) for c in cands])
+    tag = np.array([len(req & set(c.skills)) / len(req) if req else 0.0 for c in cands])
+    skill = (emb + tag) / 2 if req else emb
     hist, hist_title = [], []
     for c in cands:
         if c.history:
@@ -84,7 +94,9 @@ def score_task(
             hist.append(0.0)
             hist_title.append(None)
     hist = np.array(hist)
-    load = np.array([min((c.load_hours + extra_load.get(c.user_id, 0)) / c.capacity, 1.0) for c in cands])
+    load = np.array(
+        [min((c.load_hours + extra_load.get(c.user_id, 0)) / (c.capacity * weeks), 1.0) for c in cands]
+    )
     skill_n, hist_n = _minmax(skill), _minmax(hist)
     total = s.match_alpha * skill_n + s.match_beta * hist_n - s.match_gamma * load
     ranked = []
@@ -115,12 +127,16 @@ def _mock_reason(c: dict) -> str:
     parts = [f"{c['team']}팀 {c['name']}의 스킬이 태스크와 잘 맞습니다"]
     if c.get("similar_past_task"):
         parts.append(f"과거 '{c['similar_past_task']}' 업무를 수행했습니다")
-    parts.append(f"현재 업무량은 수용량의 {round(c['load'] * 100)}%입니다")
+    parts.append(f"업무량은 프로젝트 기간 수용량의 {round(c['load'] * 100)}%입니다")
     return ". ".join(parts) + "."
 
 
 def match_tasks(
-    db: Session, tasks: list[dict], project_id: int | None = None, with_reasons: bool = True
+    db: Session,
+    tasks: list[dict],
+    days: int = 30,
+    project_id: int | None = None,
+    with_reasons: bool = True,
 ) -> list[dict]:
     """태스크마다 상위 3명 후보와 추천 담당자를 돌려준다.
 
@@ -129,10 +145,11 @@ def match_tasks(
     cands = load_candidates(db)
     cand_by_id = {c.user_id: c for c in cands}
     vecs = [np.asarray(v) for v in embed_texts([task_text(t) for t in tasks])]
+    weeks = max(days / 7, 1.0)
     extra: dict[int, float] = {}
     results = []
     for t, v in zip(tasks, vecs, strict=True):
-        ranked = score_task(v, cands, extra)
+        ranked = score_task(v, cands, extra, t.get("required_skills"), weeks)
         top = ranked[0]
         extra[top["user_id"]] = extra.get(top["user_id"], 0) + float(t.get("estimate_hours") or 8)
         results.append({"assignee_id": top["user_id"], "candidates": ranked[:3], "reason": ""})
@@ -145,7 +162,8 @@ def match_tasks(
             lines.append(
                 f"[{i}] 태스크: {t['title']} ({t.get('description', '')})\n"
                 f"    담당자: {u.name} ({u.team}팀 {u.title}), 스킬: {', '.join(u.skills)}\n"
-                f"    과거 유사 업무: {c['similar_past_task'] or '없음'}, 현재 업무량: 수용량의 {round(c['load'] * 100)}%"
+                f"    과거 유사 업무: {c['similar_past_task'] or '없음'}, "
+                f"업무량: 프로젝트 기간 수용량의 {round(c['load'] * 100)}%"
             )
         out = call_json(
             "resource",

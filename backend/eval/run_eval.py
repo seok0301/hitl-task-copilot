@@ -57,18 +57,18 @@ def eval_matching(db) -> dict:
     methods = {"hybrid": [], "skill_only": [], "llm_only": []}
     s = get_settings()
     rows = []
-    for pid, title, _goal, _days, tasks in EVAL_PROJECTS:
+    for pid, title, _goal, days, tasks in EVAL_PROJECTS:
         ts = [
             {"title": t, "description": d, "required_skills": sk, "estimate_hours": 16}
             for t, d, sk, _, _ in tasks
         ]
-        hybrid = [r["candidates"] for r in match_tasks(db, ts, with_reasons=False)]
+        hybrid = [r["candidates"] for r in match_tasks(db, ts, days=days, with_reasons=False)]
 
         # 스킬 유사도 단독: α=1, β=γ=0
         a, b, g = s.match_alpha, s.match_beta, s.match_gamma
         s.match_alpha, s.match_beta, s.match_gamma = 1.0, 0.0, 0.0
         try:
-            skill_only = [r["candidates"] for r in match_tasks(db, ts, with_reasons=False)]
+            skill_only = [r["candidates"] for r in match_tasks(db, ts, days=days, with_reasons=False)]
         finally:
             s.match_alpha, s.match_beta, s.match_gamma = a, b, g
 

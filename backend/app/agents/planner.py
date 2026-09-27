@@ -2,10 +2,11 @@
 
 import re
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.llm.provider import call_json
-from app.models import Role
+from app.models import Role, User
 from app.rag.retriever import Hit, search
 
 SYSTEM = """너는 IT 스타트업의 프로젝트 계획 담당 에이전트다.
@@ -13,6 +14,7 @@ SYSTEM = """너는 IT 스타트업의 프로젝트 계획 담당 에이전트다
 - 태스크는 4~8개로 만들고, 한 사람이 맡을 수 있는 크기로 쪼갠다.
 - 기획, 디자인, 개발, QA, 마케팅 중 목표에 필요한 역할만 포함한다.
 - 참고 자료가 있으면 과거 프로젝트의 태스크 구성과 교훈을 반영한다.
+- required_skills는 반드시 아래 "사내 스킬 목록"에 있는 이름 그대로 1~3개 고른다.
 - estimate_hours는 한 사람 기준 작업 시간(4~120)이다.
 출력 형식:
 {"tasks": [{"title": "...", "description": "...", "required_skills": ["..."], "estimate_hours": 16}]}"""
@@ -48,6 +50,10 @@ def _mock_plan(goal: str, hits: list[Hit]) -> dict:
     }
 
 
+def skill_vocabulary(db: Session) -> list[str]:
+    return sorted({sk for skills in db.scalars(select(User.skills)) for sk in skills})
+
+
 def format_hits(hits: list[Hit]) -> str:
     return "\n\n".join(f"[{i + 1}] {h.title}\n{h.content}" for i, h in enumerate(hits))
 
@@ -64,6 +70,7 @@ def plan_tasks(
 ) -> tuple[list[dict], list[Hit]]:
     hits = search(db, f"{title}. {goal}", role, k=6) if use_rag else []
     user = f"프로젝트: {title}\n목표: {goal}\n기간: {days}일"
+    user += f"\n\n사내 스킬 목록: {', '.join(skill_vocabulary(db))}"
     if hits:
         user += f"\n\n참고 자료(사내 문서 검색 결과):\n{format_hits(hits)}"
     if feedback:

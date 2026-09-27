@@ -56,7 +56,7 @@ def planner_node(state: PlanState) -> PlanState:
 
 def matcher_node(state: PlanState) -> PlanState:
     with SessionLocal() as db:
-        assignments = match_tasks(db, state["tasks"], project_id=state["project_id"])
+        assignments = match_tasks(db, state["tasks"], days=state["days"], project_id=state["project_id"])
         project = db.get(Project, state["project_id"])
         project.status = ProjectStatus.REVIEW
         db.commit()
