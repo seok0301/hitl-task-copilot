@@ -13,7 +13,11 @@ from app.models import ApprovalLog, Project, ProjectStatus
 
 
 def test_edit_stats():
-    draft = [{"title": "a", "assignee_id": 1}, {"title": "b", "assignee_id": 2}, {"title": "c", "assignee_id": 3}]
+    draft = [
+        {"title": "a", "assignee_id": 1},
+        {"title": "b", "assignee_id": 2},
+        {"title": "c", "assignee_id": 3},
+    ]
     final = [
         {"draft_index": 0, "title": "a", "assignee_id": 1},
         {"draft_index": 1, "title": "b", "assignee_id": 5},
@@ -28,25 +32,42 @@ def test_edit_stats():
 @pytest.mark.db
 def test_plan_review_approve_cycle(monkeypatch):
     with SessionLocal() as db:
-        p = Project(title="앱 정기구독 결제", goal="모바일 앱에 정기구독 결제를 추가한다.",
-                    deadline=date.today() + timedelta(days=30), owner_id=3, graph_thread_id=str(uuid.uuid4()))
+        p = Project(
+            title="앱 정기구독 결제",
+            goal="모바일 앱에 정기구독 결제를 추가한다.",
+            deadline=date.today() + timedelta(days=30),
+            owner_id=3,
+            graph_thread_id=str(uuid.uuid4()),
+        )
         db.add(p)
         db.commit()
         pid, tid = p.id, p.graph_thread_id
 
     graph, cfg = get_graph(), thread_config(tid)
-    graph.invoke({"project_id": pid, "title": "앱 정기구독 결제", "goal": "모바일 앱에 정기구독 결제를 추가한다.",
-                  "days": 30, "use_rag": True}, cfg)
+    graph.invoke(
+        {
+            "project_id": pid,
+            "title": "앱 정기구독 결제",
+            "goal": "모바일 앱에 정기구독 결제를 추가한다.",
+            "days": 30,
+            "use_rag": True,
+        },
+        cfg,
+    )
     draft = pending_review(tid)
     assert draft and draft["tasks"] and len(draft["assignments"]) == len(draft["tasks"])
 
     # 재생성 요청 후 다시 승인 대기
-    graph.invoke(Command(resume={"action": "regenerate", "feedback": "QA를 꼭 넣어 주세요", "reviewer_id": 3}), cfg)
+    graph.invoke(
+        Command(resume={"action": "regenerate", "feedback": "QA를 꼭 넣어 주세요", "reviewer_id": 3}), cfg
+    )
     draft = pending_review(tid)
     assert draft is not None
 
-    final = [{**t, "draft_index": i, "assignee_id": a["assignee_id"]}
-             for i, (t, a) in enumerate(zip(draft["tasks"], draft["assignments"], strict=True))]
+    final = [
+        {**t, "draft_index": i, "assignee_id": a["assignee_id"]}
+        for i, (t, a) in enumerate(zip(draft["tasks"], draft["assignments"], strict=True))
+    ]
     final[0]["assignee_id"] = 16
     graph.invoke(Command(resume={"action": "approve", "tasks": final[:-1], "reviewer_id": 3}), cfg)
     assert pending_review(tid) is None
@@ -58,3 +79,20 @@ def test_plan_review_approve_cycle(monkeypatch):
         logs = db.query(ApprovalLog).filter_by(project_id=pid).order_by(ApprovalLog.id).all()
         assert [log.action for log in logs] == ["regenerate", "approve"]
         assert logs[-1].edit_stats["deleted"] == 1
+
+
+@pytest.mark.db
+def test_capacity_constraint_skips_overloaded():
+    from app.agents.resource import match_tasks
+
+    task = {
+        "title": "해지 사유 수집 API",
+        "description": "사유를 저장하는 API",
+        "required_skills": ["FastAPI"],
+        "estimate_hours": 24,
+    }
+    with SessionLocal() as db:
+        free = match_tasks(db, [task], days=21, with_reasons=False)[0]["assignee_id"]
+        busy = match_tasks(db, [task], days=21, with_reasons=False, busy={free: 500})[0]
+    assert busy["assignee_id"] != free
+    assert busy["candidates"][0]["over_capacity"] is False

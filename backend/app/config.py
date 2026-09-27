@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     match_alpha: float = 0.5
     match_beta: float = 0.3
     match_gamma: float = 0.2
+    # 배정하면 기간 수용 시간을 넘는 후보를 뒤로 미룬다.
+    match_capacity_constraint: bool = True
 
 
 @lru_cache

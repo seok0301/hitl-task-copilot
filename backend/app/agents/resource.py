@@ -5,6 +5,8 @@ score = α·스킬 적합도 + β·과거 유사 업무 이력 − γ·업무량
 - 이력: 팀원이 과거에 맡은 태스크 중 가장 비슷한 것과의 임베딩 유사도
 - 업무량: (진행 중인 업무 + 이번 계획에서 먼저 배정된 업무) / 프로젝트 기간 동안의 수용 시간
 스킬 적합도와 이력 점수는 태스크마다 후보 전체에서 0~1로 정규화한다.
+수용 시간 제약: 이 태스크를 맡으면 기간 수용 시간을 넘는 후보는 점수와 관계없이 순위를 뒤로 미룬다.
+(모든 후보가 넘으면 점수 순서를 그대로 쓴다.)
 """
 
 from dataclasses import dataclass, field
@@ -37,7 +39,8 @@ def task_text(t: dict) -> str:
     return f"{t['title']}. {t.get('description', '')} {skills}".strip()
 
 
-def load_candidates(db: Session) -> list[Candidate]:
+def load_candidates(db: Session, busy: dict[int, float] | None = None) -> list[Candidate]:
+    """후보 목록. `busy`는 평가에서 특정 인원에게 이미 잡힌 업무 시간을 가정할 때 쓴다."""
     users = db.scalars(select(User).where(User.role != Role.EXECUTIVE).order_by(User.id)).all()
     loads = dict(
         db.execute(
@@ -55,7 +58,7 @@ def load_candidates(db: Session) -> list[Candidate]:
             list(u.skills),
             np.asarray(u.skill_embedding),
             u.weekly_capacity_hours,
-            float(loads.get(u.id, 0.0)),
+            float(loads.get(u.id, 0.0)) + (busy or {}).get(u.id, 0.0),
         )
         for u in users
     }
@@ -76,8 +79,12 @@ def score_task(
     extra_load: dict[int, float] | None = None,
     required_skills: list[str] | None = None,
     weeks: float = 1.0,
+    task_hours: float = 0.0,
+    capacity_constraint: bool | None = None,
 ) -> list[dict]:
     s = get_settings()
+    if capacity_constraint is None:
+        capacity_constraint = s.match_capacity_constraint
     extra_load = extra_load or {}
     req = set(required_skills or [])
     emb = np.array([float(task_vec @ c.skill_vec) for c in cands])
@@ -99,8 +106,14 @@ def score_task(
     )
     skill_n, hist_n = _minmax(skill), _minmax(hist)
     total = s.match_alpha * skill_n + s.match_beta * hist_n - s.match_gamma * load
+    over = np.array(
+        [c.load_hours + extra_load.get(c.user_id, 0) + task_hours > c.capacity * weeks for c in cands]
+    )
+    order = np.argsort(-total)
+    if capacity_constraint and not over.all():
+        order = np.array([i for i in order if not over[i]] + [i for i in order if over[i]])
     ranked = []
-    for i in np.argsort(-total):
+    for i in order:
         c = cands[i]
         ranked.append(
             {
@@ -111,6 +124,7 @@ def score_task(
                 "skill": round(float(skill_n[i]), 4),
                 "history": round(float(hist_n[i]), 4),
                 "load": round(float(load[i]), 4),
+                "over_capacity": bool(over[i]),
                 "similar_past_task": hist_title[i],
             }
         )
@@ -137,21 +151,24 @@ def match_tasks(
     days: int = 30,
     project_id: int | None = None,
     with_reasons: bool = True,
+    busy: dict[int, float] | None = None,
+    capacity_constraint: bool | None = None,
 ) -> list[dict]:
     """태스크마다 상위 3명 후보와 추천 담당자를 돌려준다.
 
     같은 계획 안에서 먼저 배정된 태스크의 시간을 업무량에 더해, 한 사람에게 몰리지 않게 한다.
     """
-    cands = load_candidates(db)
+    cands = load_candidates(db, busy)
     cand_by_id = {c.user_id: c for c in cands}
     vecs = [np.asarray(v) for v in embed_texts([task_text(t) for t in tasks])]
     weeks = max(days / 7, 1.0)
     extra: dict[int, float] = {}
     results = []
     for t, v in zip(tasks, vecs, strict=True):
-        ranked = score_task(v, cands, extra, t.get("required_skills"), weeks)
+        hours = float(t.get("estimate_hours") or 8)
+        ranked = score_task(v, cands, extra, t.get("required_skills"), weeks, hours, capacity_constraint)
         top = ranked[0]
-        extra[top["user_id"]] = extra.get(top["user_id"], 0) + float(t.get("estimate_hours") or 8)
+        extra[top["user_id"]] = extra.get(top["user_id"], 0) + hours
         results.append({"assignee_id": top["user_id"], "candidates": ranked[:3], "reason": ""})
 
     if with_reasons and results:
@@ -185,18 +202,21 @@ def match_tasks(
 
 LLM_ONLY_SYSTEM = """너는 IT 스타트업의 담당자 배정 에이전트다.
 팀원 목록(스킬, 현재 업무량)을 보고 각 태스크에 가장 적합한 담당자를 3순위까지 고른다.
+업무가 한 사람에게 몰려 수용 시간을 넘지 않도록 한다.
 출력 형식: {"assignments": [{"index": 0, "ranking": [팀원 id, 팀원 id, 팀원 id], "reason": "..."}]}"""
 
 
-def match_tasks_llm_only(db: Session, tasks: list[dict]) -> list[list[int]]:
+def match_tasks_llm_only(
+    db: Session, tasks: list[dict], days: int = 30, busy: dict[int, float] | None = None
+) -> list[list[int]]:
     """비교 실험용: 점수 없이 LLM이 담당자를 직접 고른다."""
-    cands = load_candidates(db)
+    cands = load_candidates(db, busy)
     roster = "\n".join(
         f"id={c.user_id} {c.name} ({c.team}팀 {c.title}) 스킬: {', '.join(c.skills)} "
-        f"/ 현재 업무 {c.load_hours:.0f}시간"
+        f"/ 현재 업무 {c.load_hours:.0f}시간, 프로젝트 기간 {days}일 동안 수용 가능 "
+        f"{c.capacity * max(days / 7, 1):.0f}시간"
         for c in cands
     )
-    body = "\n".join(f"[{i}] {t['title']}: {t.get('description', '')}" for i, t in enumerate(tasks))
 
     def mock():
         # mock에서는 스킬 유사도만으로 고른다.
@@ -213,6 +233,10 @@ def match_tasks_llm_only(db: Session, tasks: list[dict]) -> list[list[int]]:
             ]
         }
 
+    body = "\n".join(
+        f"[{i}] {t['title']}: {t.get('description', '')} (예상 {t.get('estimate_hours', 8):.0f}시간)"
+        for i, t in enumerate(tasks)
+    )
     out = call_json("resource_llm_only", LLM_ONLY_SYSTEM, f"팀원:\n{roster}\n\n태스크:\n{body}", mock=mock)
     rankings: list[list[int]] = [[] for _ in tasks]
     for a in out.get("assignments", []):
