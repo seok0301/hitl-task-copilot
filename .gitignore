@@ -24,3 +24,6 @@ docs/reference/
 
 # 로컬 임베딩 모델 캐시
 .cache/
+
+# 개인 학습용 설명 자료
+whiteboarding/
