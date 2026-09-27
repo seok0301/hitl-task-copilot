@@ -36,8 +36,12 @@ def get_chat_model() -> BaseChatModel | None:
             temperature=s.llm_temperature,
             timeout=180,
             max_retries=2,
+            # 게이트웨이(vLLM)의 JSON 모드로 응답 형식을 강제한다.
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
     if s.llm_provider == "gemini":
+        if not s.allow_paid_api:
+            raise LLMError("Gemini는 과금되는 API입니다. 쓰려면 ALLOW_PAID_API=true를 설정하세요.")
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(

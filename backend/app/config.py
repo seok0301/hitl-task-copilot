@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000/v1"
     litellm_api_key: str = ""
     gemini_api_key: str = ""
+    # Gemini는 유료 API라서 ALLOW_PAID_API=true로 명시해야만 쓸 수 있다.
+    allow_paid_api: bool = False
     llm_temperature: float = 0.2
 
     embedding_provider: str = "fastembed"  # fastembed | mock
