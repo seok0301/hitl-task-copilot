@@ -28,3 +28,14 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.9",
 ]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+# B008: FastAPI Depends 관례, ISC004: 데이터 파일의 긴 문자열, DTZ011: 로컬 날짜 사용
+extend-ignore = ["B008", "ISC004", "DTZ011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["db: 실행 중인 DB와 seed 데이터가 필요한 테스트"]

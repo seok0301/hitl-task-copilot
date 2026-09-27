@@ -59,9 +59,7 @@ class User(Base):
     team: Mapped[str] = mapped_column(String(30))
     title: Mapped[str] = mapped_column(String(50), default="")
     skills: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
-    skill_embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(DIM), nullable=True
-    )
+    skill_embedding: Mapped[list[float] | None] = mapped_column(Vector(DIM), nullable=True)
     weekly_capacity_hours: Mapped[float] = mapped_column(Float, default=40)
 
 
@@ -72,18 +70,12 @@ class Project(Base):
     title: Mapped[str] = mapped_column(String(200))
     goal: Mapped[str] = mapped_column(Text)
     deadline: Mapped[date] = mapped_column(Date)
-    status: Mapped[ProjectStatus] = mapped_column(
-        Enum(ProjectStatus), default=ProjectStatus.PLANNING
-    )
+    status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.PLANNING)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     graph_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    tasks: Mapped[list["Task"]] = relationship(
-        back_populates="project", order_by="Task.id"
-    )
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project", order_by="Task.id")
 
 
 class Task(Base):
@@ -96,19 +88,13 @@ class Task(Base):
     required_skills: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     estimate_hours: Mapped[float] = mapped_column(Float, default=8)
     deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
-    assignee_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True
-    )
-    status: Mapped[TaskStatus] = mapped_column(
-        Enum(TaskStatus), default=TaskStatus.TODO
-    )
+    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.TODO)
     ai_draft: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="tasks")
     assignee: Mapped[User | None] = relationship()
-    submissions: Mapped[list["Submission"]] = relationship(
-        back_populates="task", order_by="Submission.id"
-    )
+    submissions: Mapped[list["Submission"]] = relationship(back_populates="task", order_by="Submission.id")
 
 
 class Submission(Base):
@@ -119,9 +105,7 @@ class Submission(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     content: Mapped[str] = mapped_column(Text)
     ai_review: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task: Mapped[Task] = relationship(back_populates="submissions")
 
@@ -133,13 +117,9 @@ class Document(Base):
     title: Mapped[str] = mapped_column(String(200))
     content: Mapped[str] = mapped_column(Text)
     access_level: Mapped[int] = mapped_column(Integer, default=1)
-    past_project_id: Mapped[int | None] = mapped_column(
-        ForeignKey("past_projects.id"), nullable=True
-    )
+    past_project_id: Mapped[int | None] = mapped_column(ForeignKey("past_projects.id"), nullable=True)
 
-    chunks: Mapped[list["DocChunk"]] = relationship(
-        back_populates="document", cascade="all, delete-orphan"
-    )
+    chunks: Mapped[list["DocChunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class DocChunk(Base):
@@ -193,9 +173,7 @@ class ApprovalLog(Base):
     final: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     edit_stats: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     review_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class LLMCall(Base):
@@ -210,6 +188,4 @@ class LLMCall(Base):
     latency_ms: Mapped[float] = mapped_column(Float)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
