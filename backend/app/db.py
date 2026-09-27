@@ -20,6 +20,9 @@ def init_db(drop: bool = False) -> None:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     if drop:
         Base.metadata.drop_all(engine)
+        with engine.begin() as conn:
+            for t in ("checkpoint_writes", "checkpoint_blobs", "checkpoints", "checkpoint_migrations"):
+                conn.execute(text(f"DROP TABLE IF EXISTS {t}"))
     Base.metadata.create_all(engine)
 
 
