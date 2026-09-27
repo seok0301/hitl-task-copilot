@@ -73,6 +73,8 @@ class Project(Base):
     status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.PLANNING)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     graph_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    use_rag: Mapped[bool] = mapped_column(default=True)
+    planning_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="project", order_by="Task.id")
