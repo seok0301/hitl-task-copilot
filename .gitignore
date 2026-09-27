@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# 과제 양식·제안서 원본 (개인 정보 포함, 로컬 참고용)
+docs/reference/
+
+# 로컬 임베딩 모델 캐시
+.cache/
