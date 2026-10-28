@@ -39,6 +39,8 @@ class PlanState(TypedDict, total=False):
 
 
 def planner_node(state: PlanState) -> PlanState:
+    # 재생성 요청이면 관리자가 본 이전 초안을 함께 넘겨, 피드백에 해당하는 부분만 고치게 한다.
+    previous = state.get("tasks") if state.get("feedback") else None
     with SessionLocal() as db:
         tasks, hits = plan_tasks(
             db,
@@ -49,6 +51,7 @@ def planner_node(state: PlanState) -> PlanState:
             use_rag=state.get("use_rag", True),
             feedback=state.get("feedback"),
             project_id=state["project_id"],
+            previous=previous,
         )
     sources = [{"title": h.title, "score": h.score, "content": h.content} for h in hits]
     return {"tasks": tasks, "sources": sources, "round": state.get("round", 0) + 1}

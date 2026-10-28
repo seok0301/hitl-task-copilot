@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me"
     jwt_expire_minutes: int = 60 * 12
 
+    # 계획 에이전트의 사내 문서 검색 방식: chunk | lexical | draft (app/agents/planner.py의 retrieve 참고)
+    rag_mode: str = "lexical"
+    # 관리자가 수정을 요청했을 때의 처리: edit | rewrite | regenerate (app/agents/planner.py의 plan_tasks 참고)
+    plan_revision: str = "edit"
+    # 참고 자료의 교훈을 먼저 골라 태스크로 옮기고 태스크마다 근거를 남기는 프롬프트를 쓴다.
+    plan_extract_lessons: bool = True
+
     # 담당자 추천 가중치: score = α·스킬 유사도 + β·이력 점수 − γ·업무량
     match_alpha: float = 0.5
     match_beta: float = 0.3
