@@ -27,7 +27,7 @@ from app.agents.planner import plan_tasks
 from app.agents.resource import load_candidates, match_tasks, match_tasks_llm_only, task_text
 from app.config import ROOT_DIR, get_settings
 from app.db import SessionLocal
-from app.llm.provider import model_name
+from app.llm.provider import call_json, model_name
 from app.models import Role
 from app.rag.retriever import Hit, visible_documents
 from app.seed.heldout_set import HELDOUT_FEEDBACK, HELDOUT_MATCH_PROJECTS
@@ -111,6 +111,7 @@ def _match(db, ts, p, weights, cap, tier) -> list[int]:
             busy=p["busy"],
             capacity_constraint=cap,
             role_filter=tier,
+            strategy="score",
         )
     finally:
         s.match_alpha, s.match_beta, s.match_gamma = saved
@@ -156,8 +157,9 @@ def run_matching(name: str, repeats: int) -> dict:
     default = (s.match_alpha, s.match_beta, s.match_gamma)
     skill = (1.0, 0.0, 0.0)
     variants = {
-        "proposed": (default, True, True),  # 점수 + 수용 시간 제약 + 후보 계층
-        "no_tier": (default, True, False),
+        # 점수 방식(초기 설계): 점수 + 수용 시간 규칙 + 후보 계층, 계층 없음, 규칙 없음, 스킬만
+        "score_tier": (default, True, True),
+        "score_cap": (default, True, False),
         "score_only": (default, False, False),
         "skill_only": (skill, False, False),
     }
@@ -170,13 +172,17 @@ def run_matching(name: str, repeats: int) -> dict:
             tags = llm_skill_tags(db, base)
             ts = [{**b, "estimate_hours": t["hours"]} for b, t in zip(base, p["tasks"], strict=True)]
             llm = match_tasks_llm_only(db, ts, days=p["days"], busy=p["busy"])
-        return tags, llm
+            # 제안 방식: 시스템이 실제로 쓰는 match_tasks(LLM 순위 + 수용 시간 규칙)를 그대로 부른다.
+            sys_ts = [{**x, "required_skills": tg} for x, tg in zip(ts, tags, strict=True)]
+            res = match_tasks(db, sys_ts, days=p["days"], busy=p["busy"], strategy="llm_rank")
+            proposed = [[c["user_id"] for c in r["candidates"]] for r in res]
+        return tags, llm, proposed
 
     llm_out = pmap(llm_part, jobs)
     rows = []
     with SessionLocal() as db:
-        for (p, r), (tags, llm) in zip(jobs, llm_out, strict=True):
-            preds = {}
+        for (p, r), (tags, llm, proposed) in zip(jobs, llm_out, strict=True):
+            preds = {"proposed": proposed}
             for m, (w, cap, tier) in variants.items():
                 ts = [
                     {
@@ -189,7 +195,6 @@ def run_matching(name: str, repeats: int) -> dict:
                 ]
                 preds[m] = _match(db, ts, p, w, cap, tier)
             preds["llm_only"] = llm
-            preds["llm_only_capfilter"] = capacity_filter(db, p, llm)
             overloads = {m: overload_count(db, p, [x[0] if x else -1 for x in v]) for m, v in preds.items()}
             for i, t in enumerate(p["tasks"]):
                 rows.append(
@@ -260,7 +265,7 @@ def run_matching(name: str, repeats: int) -> dict:
         return {k: statistics.mean(v) for k, v in acc.items()}
 
     comparisons = {}
-    for a, b in [("proposed", "llm_only"), ("proposed", "llm_only_capfilter"), ("proposed", "no_tier")]:
+    for a, b in [("proposed", "llm_only"), ("proposed", "score_tier"), ("score_tier", "score_cap")]:
         for strict in (False, True):
             ta, tb = task_means(a, strict), task_means(b, strict)
             diffs: dict[str, list[float]] = {}
@@ -431,6 +436,19 @@ def run_planning(name: str, conditions: list[str], repeats: int) -> dict:
 
 
 # ── 관리자 피드백(HITL) ──
+SEPARATE_SYSTEM = """너는 프로젝트 계획을 평가하는 심사자다.
+생성된 계획에 기준 작업을 수행하는 별도의 태스크가 있는지 판단한다.
+다른 태스크의 설명 안에서 언급만 되거나 일부로 포함된 것은 별도 태스크로 보지 않는다.
+출력 형식: {"separate": true}"""
+
+
+def has_separate_task(ref: str, gen: list[str]) -> bool:
+    """삭제 요청 채점용. covered_by_judge는 다른 태스크 설명 속 언급도 포함으로 보므로 삭제 판정에는 맞지 않는다."""
+    user = f"기준 작업: {ref}\n\n생성된 계획:\n" + "\n".join(f"- {g}" for g in gen)
+    out = call_json("eval_judge_separate", SEPARATE_SYSTEM, user, mock=lambda: {"separate": False})
+    return bool(out.get("separate")) if isinstance(out, dict) else False
+
+
 def run_feedback(name: str, repeats: int) -> dict:
     """관리자 피드백 반영 실험. 같은 초안에 대해 두 재생성 방식을 비교한다.
 
@@ -475,9 +493,10 @@ def run_feedback(name: str, repeats: int) -> dict:
                 regen_text = [task_text(g) for g in regen]
                 if kind == "limit":
                     reflected = len(regen) <= int(target)
+                elif kind == "add":
+                    reflected = covered_by_judge([tref], regen_text)[0]
                 else:
-                    present = covered_by_judge([tref], regen_text)[0]
-                    reflected = present if kind == "add" else not present
+                    reflected = not has_separate_task(tref, regen_text)
                 preserved = mean(covered_by_judge(keep, regen_text)) if keep and kind != "limit" else None
                 out[mode] = {
                     "reflected": reflected,
