@@ -27,11 +27,13 @@ SYSTEM_BASE = """너는 IT 스타트업의 프로젝트 계획 담당 에이전�
 # 근거(basis)는 관리자가 초안을 검토할 때 왜 이 태스크가 들어갔는지 확인하는 데 쓴다.
 SYSTEM_LESSONS = """너는 IT 스타트업의 프로젝트 계획 담당 에이전트다.
 관리자가 준 목표를 실행 가능한 하위 태스크로 나눈다.
-- 태스크는 4~8개로 만들고, 한 사람이 맡을 수 있는 크기로 쪼갠다.
+- 태스크는 4~10개로 만들고, 한 사람이 맡을 수 있는 크기로 쪼갠다.
 - 기획, 디자인, 개발, QA, 마케팅 중 목표에 필요한 역할만 포함한다.
-- 참고 자료가 있으면, 먼저 참고 자료에 적힌 교훈·재발 방지책·사내 규정 중 이번 프로젝트에 해당하는 것을 모두 골라
+- 먼저 목표를 달성하는 데 필요한 기본 작업(정책·기획, 디자인, 개발, 검증, 홍보 중 해당하는 것)을 빠짐없이 태스크로 만든다.
+- 참고 자료가 있으면, 참고 자료에 적힌 교훈·재발 방지책·사내 규정 중 이번 프로젝트에 해당하는 것을 모두 골라
   lessons에 적는다. 이번 프로젝트와 관계없는 자료는 무시한다.
-- lessons의 각 항목은 별도 태스크로 만들거나, 관련 태스크의 설명에 구체적으로 적어 계획에 반드시 반영한다.
+- lessons의 각 항목은 기본 작업에 더해 별도 태스크로 만들거나, 관련 태스크의 설명에 구체적으로 적는다.
+  교훈을 넣으려고 기본 작업을 빼거나 다른 작업과 합치지 않는다. 태스크 수가 늘어도 된다.
 - 태스크마다 basis에 근거를 적는다. 참고 자료에서 온 태스크는 "[자료 번호] 교훈 요약", 일반적인 작업은 빈 문자열로 둔다.
 - required_skills는 반드시 아래 "사내 스킬 목록"에 있는 이름 그대로 1~3개 고른다.
 - estimate_hours는 한 사람 기준 작업 시간(4~120)이다.
@@ -180,6 +182,45 @@ def apply_edits(previous: list[dict], edits: list[dict]) -> list[dict]:
     return [t for t in tasks if t is not None] + added
 
 
+AUGMENT_SYSTEM = """너는 IT 스타트업의 프로젝트 계획 담당 에이전트다.
+목표만 보고 만든 기본 계획이 있다. 사내 참고 자료를 읽고, 이번 프로젝트에 해당하는 교훈·재발 방지책·사내 규정을
+기본 계획에 반영하는 편집 명령만 낸다. 기본 계획의 작업은 지우지 않는다.
+- 먼저 참고 자료에서 이번 프로젝트에 해당하는 교훈·규정을 모두 골라 lessons에 적는다. 관계없는 자료는 무시한다.
+- 각 교훈은 새 태스크로 추가(add)하거나, 관련 태스크의 설명에 구체적으로 넣어 수정(update)한다.
+- update할 때는 원래 작업 내용을 유지한 채 교훈만 덧붙인다.
+- 태스크마다 basis에 근거를 "[자료 번호] 교훈 요약"으로 적는다.
+- required_skills는 "사내 스킬 목록"에 있는 이름 그대로 1~3개 고른다.
+출력 형식:
+{"lessons": [{"source": 1, "lesson": "..."}],
+ "edits": [{"op": "update", "index": 1, "task": {"title": "...", "description": "...", "required_skills": ["..."], "estimate_hours": 16, "basis": "..."}},
+           {"op": "add", "task": {"title": "...", "description": "...", "required_skills": ["..."], "estimate_hours": 16, "basis": "..."}}]}"""
+
+
+def augment_with_lessons(
+    db: Session,
+    title: str,
+    goal: str,
+    days: int,
+    hits: list[Hit],
+    base: list[dict],
+    project_id: int | None = None,
+) -> list[dict]:
+    """기본 계획에 참고 자료의 교훈을 더한다. 삭제 명령은 적용하지 않으므로 기본 작업은 그대로 남는다."""
+    if not hits:
+        return base
+    user = f"프로젝트: {title}\n목표: {goal}\n기간: {days}일"
+    user += f"\n\n사내 스킬 목록: {', '.join(skill_vocabulary(db))}"
+    user += f"\n\n참고 자료(사내 문서 검색 결과):\n{format_hits(hits)}"
+    user += "\n\n기본 계획:\n" + "\n".join(
+        f"[{i}] {t['title']}: {t.get('description', '')}" for i, t in enumerate(base)
+    )
+    out = call_json(
+        "planner_augment", AUGMENT_SYSTEM, user, mock=lambda: {"edits": []}, project_id=project_id
+    )
+    edits = out.get("edits", []) if isinstance(out, dict) else []
+    return apply_edits(base, [e for e in edits if isinstance(e, dict) and e.get("op") in ("add", "update")])
+
+
 def revise_tasks(
     db: Session,
     title: str,
@@ -243,5 +284,9 @@ def plan_tasks(
     if hits is None:
         mode = rag_mode or get_settings().rag_mode
         hits = retrieve(db, title, goal, days, role, mode, previous, project_id) if use_rag else []
+    if get_settings().plan_strategy == "augment" and not previous and not feedback:
+        # 두 단계: 목표만 보고 기본 계획을 만든 뒤, 참고 자료의 교훈을 추가·수정 명령으로만 더한다.
+        base = _generate(db, title, goal, days, [], None, None, "planner", project_id)
+        return augment_with_lessons(db, title, goal, days, hits, base, project_id), hits
     tasks = _generate(db, title, goal, days, hits, feedback, previous, "planner", project_id)
     return tasks, hits

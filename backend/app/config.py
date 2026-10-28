@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     plan_revision: str = "edit"
     # 참고 자료의 교훈을 먼저 골라 태스크로 옮기고 태스크마다 근거를 남기는 프롬프트를 쓴다.
     plan_extract_lessons: bool = True
+    # 계획 방식: single(참고 자료와 함께 한 번에 계획) | augment(기본 계획 후 교훈을 추가·수정 명령으로 더함)
+    plan_strategy: str = "augment"
 
     # 담당자 추천 가중치: score = α·스킬 유사도 + β·이력 점수 − γ·업무량
     match_alpha: float = 0.5
