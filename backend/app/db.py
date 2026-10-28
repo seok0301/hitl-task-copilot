@@ -5,7 +5,8 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
 
-engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+# 평가 스크립트가 LLM 호출을 병렬로 보내므로 연결 풀을 넉넉히 둔다.
+engine = create_engine(get_settings().database_url, pool_pre_ping=True, pool_size=20, max_overflow=30)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
