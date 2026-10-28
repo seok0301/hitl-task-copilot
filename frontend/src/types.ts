@@ -33,6 +33,7 @@ export interface DraftTask {
   description: string
   required_skills: string[]
   estimate_hours: number
+  basis?: string
 }
 
 export interface Assignment {
