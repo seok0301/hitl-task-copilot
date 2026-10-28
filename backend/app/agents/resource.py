@@ -6,8 +6,8 @@ score = α·스킬 적합도 + β·과거 유사 업무 이력 − γ·업무량
 - 업무량: (진행 중인 업무 + 이번 계획에서 먼저 배정된 업무) / 프로젝트 기간 동안의 수용 시간
 스킬 적합도와 이력 점수는 태스크마다 후보 전체에서 0~1로 정규화한다.
 수용 시간 제약: 이 태스크를 맡으면 기간 수용 시간을 넘는 후보는 점수와 관계없이 순위를 뒤로 미룬다.
-(모든 후보가 넘으면 점수 순서를 그대로 쓴다.) 넘지 않는 후보는 다시 필요 스킬 보유자, 점수 1위와 같은 팀,
-나머지 순서의 계층으로 나눠, 적임자가 빠졌을 때 직무가 다른 사람이 대체자로 올라오지 않게 한다.
+(모든 후보가 넘으면 점수 순서를 그대로 쓴다.) 넘지 않는 후보는 다시 점수 1위와 같은 직함, 필요 스킬 보유자,
+점수 1위와 같은 팀, 나머지 순서의 계층으로 나눠, 적임자가 빠졌을 때 직무가 다른 사람이 대체자로 올라오지 않게 한다.
 """
 
 from dataclasses import dataclass, field
@@ -117,17 +117,20 @@ def score_task(
         if role_filter is None:
             role_filter = s.match_role_filter
         # 후보 계층: 과부하 적임자를 뺄 때, 직무가 맞는 사람부터 대체자로 찾는다.
-        # 0: 필요 스킬 보유  1: 점수 1위와 같은 팀  2: 나머지  3: 수용 시간 초과
-        top_team = cands[order[0]].team
+        # 점수 1위(제약을 적용하기 전)의 직함을 이 태스크에 필요한 직무로 본다.
+        # 0: 점수 1위와 같은 직함  1: 필요 스킬 보유  2: 점수 1위와 같은 팀  3: 나머지  4: 수용 시간 초과
+        top = cands[order[0]]
         for i, c in enumerate(cands):
             if over[i]:
-                tier[i] = 3
-            elif not role_filter or req and req & set(c.skills):
+                tier[i] = 4
+            elif not role_filter or c.title == top.title:
                 tier[i] = 0
-            elif c.team == top_team:
+            elif req and req & set(c.skills):
                 tier[i] = 1
-            else:
+            elif c.team == top.team:
                 tier[i] = 2
+            else:
+                tier[i] = 3
         order = sorted(order, key=lambda i: tier[i])  # 안정 정렬이라 같은 계층 안에서는 점수 순서가 유지된다
     ranked = []
     for i in order:
@@ -222,9 +225,11 @@ def match_tasks(
 
 
 LLM_ONLY_SYSTEM = """너는 IT 스타트업의 담당자 배정 에이전트다.
-팀원 목록(스킬, 현재 업무량)을 보고 각 태스크에 가장 적합한 담당자를 3순위까지 고른다.
-업무가 한 사람에게 몰려 수용 시간을 넘지 않도록 한다.
-출력 형식: {"assignments": [{"index": 0, "ranking": [팀원 id, 팀원 id, 팀원 id], "reason": "..."}]}"""
+팀원 목록(스킬, 현재 업무량)을 보고 각 태스크에 가장 적합한 담당자를 5순위까지 고른다.
+ranking의 첫 번째 사람이 실제로 배정된다. 태스크들은 이번 프로젝트에서 한꺼번에 배정되므로,
+한 사람의 (현재 업무 + 이번에 앞서 배정한 태스크 시간 + 이 태스크 시간)이 그 사람의 수용 가능 시간을 넘으면
+그 사람을 첫 번째로 두지 않는다.
+출력 형식: {"assignments": [{"index": 0, "ranking": [팀원 id, 팀원 id, 팀원 id, 팀원 id, 팀원 id], "reason": "..."}]}"""
 
 
 def match_tasks_llm_only(
@@ -247,7 +252,7 @@ def match_tasks_llm_only(
                 {
                     "index": i,
                     "ranking": [
-                        cands[j].user_id for j in np.argsort([-(v @ c.skill_vec) for c in cands])[:3]
+                        cands[j].user_id for j in np.argsort([-(v @ c.skill_vec) for c in cands])[:5]
                     ],
                 }
                 for i, v in enumerate(vecs)
