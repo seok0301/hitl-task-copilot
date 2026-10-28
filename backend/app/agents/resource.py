@@ -1,4 +1,8 @@
-"""② 리소스 에이전트: 하이브리드 점수로 담당자를 고르고, LLM은 추천 사유만 쓴다.
+"""② 리소스 에이전트: LLM이 담당자 순위를 매기고, 규칙이 수용 시간을 지키게 한다.
+
+기본 방식(llm_rank)은 LLM이 팀원 목록을 보고 매긴 순위에서 수용 시간을 넘는 사람을 규칙으로 건너뛴다.
+LLM에 "수용 시간을 넘기지 말라"고 지시만 하면 지켜지지 않았기 때문이다(eval/PROTOCOL.md H1).
+아래 점수 방식은 초기 설계로, 지금은 후보별 근거(스킬·이력·업무량) 표시와 LLM이 실패했을 때의 예비 경로로 쓴다.
 
 score = α·스킬 적합도 + β·과거 유사 업무 이력 − γ·업무량
 - 스킬 적합도: 태스크와 팀원 스킬의 임베딩 유사도와 필요 스킬 태그 일치율의 평균
@@ -18,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.llm.embeddings import embed_texts
-from app.llm.provider import call_json
+from app.llm.provider import LLMError, call_json
 from app.models import PastTask, Role, Task, TaskStatus, User
 
 
@@ -175,10 +179,85 @@ def match_tasks(
     busy: dict[int, float] | None = None,
     capacity_constraint: bool | None = None,
     role_filter: bool | None = None,
+    strategy: str | None = None,
 ) -> list[dict]:
-    """태스크마다 상위 3명 후보와 추천 담당자를 돌려준다.
+    """태스크마다 추천 담당자와 상위 3명 후보를 돌려준다.
+
+    strategy(기본값은 설정의 match_strategy)
+    - llm_rank: LLM이 팀원 목록을 보고 순위를 매기고, 규칙이 수용 시간을 넘는 사람을 순위에서 건너뛴다.
+      LLM 순위에 수용 시간 안의 사람이 없거나 LLM 호출이 실패하면 점수 방식으로 고른다.
+    - score: 하이브리드 점수와 규칙으로 고른다(match_tasks_score).
+    """
+    strategy = strategy or get_settings().match_strategy
+    if strategy == "score":
+        return match_tasks_score(
+            db, tasks, days, project_id, with_reasons, busy, capacity_constraint, role_filter
+        )
+    try:
+        rankings, reasons = llm_rankings(db, tasks, days, busy, "resource", project_id)
+    except LLMError:
+        return match_tasks_score(db, tasks, days, project_id, with_reasons, busy)
+
+    cands = load_candidates(db, busy)
+    vecs = [np.asarray(v) for v in embed_texts([task_text(t) for t in tasks])]
+    weeks = max(days / 7, 1.0)
+    extra: dict[int, float] = {}
+    results = []
+    for i, (t, v) in enumerate(zip(tasks, vecs, strict=True)):
+        hours = float(t.get("estimate_hours") or 8)
+        # 점수 순위는 후보별 근거(스킬·이력·업무량)를 보여 주고, LLM 순위가 모두 막혔을 때 쓴다.
+        ranked = score_task(v, cands, extra, t.get("required_skills"), weeks, hours, True, True)
+        by_id = {r["user_id"]: r for r in ranked}
+        llm_order = [u for u in dict.fromkeys(rankings[i]) if u in by_id]
+        feasible = [u for u in llm_order if not by_id[u]["over_capacity"]]
+        if feasible:
+            chosen, source = feasible[0], "llm"
+        else:
+            chosen, source = ranked[0]["user_id"], "score"
+        skipped = (
+            [by_id[u]["name"] for u in llm_order[: llm_order.index(chosen)]] if chosen in llm_order else []
+        )
+        order = [chosen, *feasible, *(r["user_id"] for r in ranked)]
+        candidates = [by_id[u] for u in dict.fromkeys(order)][:3]
+        if source == "llm" and not skipped:
+            reason = reasons[i]
+        elif source == "llm":
+            reason = (
+                f"AI가 먼저 추천한 {', '.join(skipped)}은(는) 이 태스크를 맡으면 프로젝트 기간의 수용 시간을 넘어 "
+                f"규칙에 따라 제외했고, 다음 순위인 {by_id[chosen]['name']}을(를) 배정했습니다."
+            )
+        else:
+            reason = (
+                _mock_reason(by_id[chosen])
+                + " (AI 추천 후보가 모두 수용 시간을 넘어 점수 순위로 골랐습니다.)"
+            )
+        extra[chosen] = extra.get(chosen, 0) + hours
+        results.append(
+            {
+                "assignee_id": chosen,
+                "candidates": candidates,
+                "reason": reason if with_reasons else "",
+                "source": source,
+                "skipped": skipped,
+            }
+        )
+    return results
+
+
+def match_tasks_score(
+    db: Session,
+    tasks: list[dict],
+    days: int = 30,
+    project_id: int | None = None,
+    with_reasons: bool = True,
+    busy: dict[int, float] | None = None,
+    capacity_constraint: bool | None = None,
+    role_filter: bool | None = None,
+) -> list[dict]:
+    """점수 방식: 하이브리드 점수와 규칙(수용 시간 제약, 후보 계층)으로 고르고, LLM은 추천 사유만 쓴다.
 
     같은 계획 안에서 먼저 배정된 태스크의 시간을 업무량에 더해, 한 사람에게 몰리지 않게 한다.
+    LLM 순위 방식의 예비 경로이자 비교 실험의 기준선이다.
     """
     cands = load_candidates(db, busy)
     cand_by_id = {c.user_id: c for c in cands}
@@ -224,18 +303,25 @@ def match_tasks(
     return results
 
 
+# 담당자 순위 프롬프트. 기본 방식(llm_rank)과 비교 실험의 LLM 단독 방식이 같은 프롬프트를 쓴다.
 LLM_ONLY_SYSTEM = """너는 IT 스타트업의 담당자 배정 에이전트다.
 팀원 목록(스킬, 현재 업무량)을 보고 각 태스크에 가장 적합한 담당자를 5순위까지 고른다.
 ranking의 첫 번째 사람이 실제로 배정된다. 태스크들은 이번 프로젝트에서 한꺼번에 배정되므로,
 한 사람의 (현재 업무 + 이번에 앞서 배정한 태스크 시간 + 이 태스크 시간)이 그 사람의 수용 가능 시간을 넘으면
 그 사람을 첫 번째로 두지 않는다.
+reason에는 첫 번째 사람을 고른 이유를 스킬, 비슷한 경험, 업무량을 근거로 한두 문장 한국어로 쓴다.
 출력 형식: {"assignments": [{"index": 0, "ranking": [팀원 id, 팀원 id, 팀원 id, 팀원 id, 팀원 id], "reason": "..."}]}"""
 
 
-def match_tasks_llm_only(
-    db: Session, tasks: list[dict], days: int = 30, busy: dict[int, float] | None = None
-) -> list[list[int]]:
-    """비교 실험용: 점수 없이 LLM이 담당자를 직접 고른다."""
+def llm_rankings(
+    db: Session,
+    tasks: list[dict],
+    days: int = 30,
+    busy: dict[int, float] | None = None,
+    agent: str = "resource_llm_only",
+    project_id: int | None = None,
+) -> tuple[list[list[int]], list[str]]:
+    """LLM이 팀원 목록(스킬, 현재 업무, 수용 시간)을 보고 태스크마다 5순위까지 매긴 순위와 사유."""
     cands = load_candidates(db, busy)
     roster = "\n".join(
         f"id={c.user_id} {c.name} ({c.team}팀 {c.title}) 스킬: {', '.join(c.skills)} "
@@ -254,6 +340,7 @@ def match_tasks_llm_only(
                     "ranking": [
                         cands[j].user_id for j in np.argsort([-(v @ c.skill_vec) for c in cands])[:5]
                     ],
+                    "reason": "스킬 유사도가 가장 높습니다.",
                 }
                 for i, v in enumerate(vecs)
             ]
@@ -263,10 +350,21 @@ def match_tasks_llm_only(
         f"[{i}] {t['title']}: {t.get('description', '')} (예상 {t.get('estimate_hours', 8):.0f}시간)"
         for i, t in enumerate(tasks)
     )
-    out = call_json("resource_llm_only", LLM_ONLY_SYSTEM, f"팀원:\n{roster}\n\n태스크:\n{body}", mock=mock)
+    out = call_json(
+        agent, LLM_ONLY_SYSTEM, f"팀원:\n{roster}\n\n태스크:\n{body}", mock=mock, project_id=project_id
+    )
     rankings: list[list[int]] = [[] for _ in tasks]
-    for a in out.get("assignments", []):
-        idx = a.get("index")
+    reasons = ["" for _ in tasks]
+    for a in out.get("assignments", []) if isinstance(out, dict) else []:
+        idx = a.get("index") if isinstance(a, dict) else None
         if isinstance(idx, int) and 0 <= idx < len(tasks):
             rankings[idx] = [int(x) for x in a.get("ranking", []) if str(x).isdigit()]
-    return rankings
+            reasons[idx] = str(a.get("reason", ""))
+    return rankings, reasons
+
+
+def match_tasks_llm_only(
+    db: Session, tasks: list[dict], days: int = 30, busy: dict[int, float] | None = None
+) -> list[list[int]]:
+    """비교 실험용: 규칙 없이 LLM 순위를 그대로 쓴다."""
+    return llm_rankings(db, tasks, days, busy)[0]
