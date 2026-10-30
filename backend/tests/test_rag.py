@@ -3,7 +3,7 @@ import pytest
 from app.db import SessionLocal
 from app.models import Role
 from app.rag.ingest import chunk_text
-from app.rag.retriever import search
+from app.rag.retriever import search, search_docs
 
 
 def test_chunk_text_respects_limit():
@@ -27,3 +27,13 @@ def test_search_finds_related_retrospective():
     with SessionLocal() as db:
         hits = search(db, "앱 정기구독 결제", Role.MANAGER, k=3)
     assert any("정기구독" in h.title for h in hits)
+
+
+@pytest.mark.db
+def test_search_docs_filters_and_ranks_documents():
+    with SessionLocal() as db:
+        emp = search_docs(db, ["인사 평가 보상 조정"], Role.EMPLOYEE, k=20)
+        hits = search_docs(db, ["회원 등급제 도입", "회원 DB 구조 변경과 마이그레이션"], Role.MANAGER, k=6)
+    assert all(h.access_level <= 1 for h in emp)
+    assert len({h.document_id for h in hits}) == len(hits)
+    assert any("회원 체계 개편" in h.title for h in hits)

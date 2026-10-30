@@ -4,6 +4,7 @@ human_review에서 그래프가 멈추고, 관리자의 결정이 `Command(resum
 그래프 상태는 Postgres 체크포인터에 저장되므로 서버를 재시작해도 승인 대기 상태가 유지된다.
 """
 
+import threading
 import time
 from datetime import date
 from functools import lru_cache
@@ -39,6 +40,8 @@ class PlanState(TypedDict, total=False):
 
 
 def planner_node(state: PlanState) -> PlanState:
+    # 재생성 요청이면 관리자가 본 이전 초안을 함께 넘겨, 피드백에 해당하는 부분만 고치게 한다.
+    previous = state.get("tasks") if state.get("feedback") else None
     with SessionLocal() as db:
         tasks, hits = plan_tasks(
             db,
@@ -49,6 +52,7 @@ def planner_node(state: PlanState) -> PlanState:
             use_rag=state.get("use_rag", True),
             feedback=state.get("feedback"),
             project_id=state["project_id"],
+            previous=previous,
         )
     sources = [{"title": h.title, "score": h.score, "content": h.content} for h in hits]
     return {"tasks": tasks, "sources": sources, "round": state.get("round", 0) + 1}
@@ -139,8 +143,20 @@ def build_graph(checkpointer=None):
     return g.compile(checkpointer=checkpointer)
 
 
-@lru_cache
+_graph_lock = threading.Lock()
+
+
 def get_graph():
+    # 첫 요청 여러 개가 동시에 들어오면 체크포인터 테이블 생성(setup)이 겹쳐 실패하므로 한 번만 만든다.
+    with _graph_lock:
+        return _build_graph()
+
+
+get_graph.cache_clear = lambda: _build_graph.cache_clear()
+
+
+@lru_cache
+def _build_graph():
     url = get_settings().database_url.replace("postgresql+psycopg://", "postgresql://")
     pool = ConnectionPool(
         url,

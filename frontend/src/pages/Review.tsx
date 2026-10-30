@@ -9,6 +9,7 @@ interface Row {
   description: string
   required_skills: string[]
   estimate_hours: number
+  basis?: string
   assignee_id: number | null
   ai: Assignment | null
 }
@@ -99,6 +100,7 @@ export default function ReviewPage() {
             <div className="fields">
               <input className="title-input" value={r.title} onChange={(e) => update(i, { title: e.target.value })} />
               <textarea rows={2} value={r.description} onChange={(e) => update(i, { description: e.target.value })} />
+              {r.basis && <p className="muted">근거: {r.basis}</p>}
               <div className="inline">
                 <label className="inline">예상 시간
                   <input type="number" min={1} value={r.estimate_hours} className="num-input"

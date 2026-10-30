@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me"
     jwt_expire_minutes: int = 60 * 12
 
+    # 계획 에이전트의 사내 문서 검색 방식: chunk | lexical | draft (app/agents/planner.py의 retrieve 참고)
+    rag_mode: str = "lexical"
+    # 관리자가 수정을 요청했을 때의 처리: edit | rewrite | regenerate (app/agents/planner.py의 plan_tasks 참고)
+    plan_revision: str = "edit"
+    # 참고 자료의 교훈을 먼저 골라 태스크로 옮기고 태스크마다 근거를 남기는 프롬프트를 쓴다.
+    plan_extract_lessons: bool = True
+    # 계획 방식: single(참고 자료와 함께 한 번에 계획) | augment(기본 계획 후 교훈을 추가·수정 명령으로 더함)
+    plan_strategy: str = "augment"
+
+    # 담당자 추천 방식: llm_rank(LLM 순위 + 수용 시간 규칙, 점수 방식은 예비) | score(점수 + 규칙)
+    match_strategy: str = "llm_rank"
     # 담당자 추천 가중치: score = α·스킬 유사도 + β·이력 점수 − γ·업무량
     match_alpha: float = 0.5
     match_beta: float = 0.3
